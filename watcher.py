@@ -125,6 +125,11 @@ def build_sources(cfg):
         q = " OR ".join(f'"{n}"' for n in names)
         for lc in p["locales"]:
             add_gn(q, lc, "player", f"joueur:{p['name']} [{lc}]", p["name"], speed="slow")
+    for p in cfg.get("staff", []):
+        q = " OR ".join(f'"{n}"' for n in [p["name"]] + p.get("search_aliases", []))
+        for lc in p.get("locales", ["FRA"]):
+            add_gn(q, lc, "staff", f"staff:{p['name']} [{lc}]", None, speed="slow")
+            src[-1]["foreign"] = False
     for n in cfg.get("academy", []):
         add_gn(f'"{n}" {cfg.get("academy_suffix", "")}'.strip(), "FRA", "player", f"académie:{n}", n, speed="slow")
     for c in cfg.get("youtube_channels", []):
@@ -241,12 +246,16 @@ class Rules:
         self.interview = Matcher(k["interview"]); self.life = Matcher(k["life"])
         self.selection = Matcher(k.get("selection", []))
         self.critical = Matcher(k["critical_outside_hours"])
-        self.club = Matcher(cfg["club_terms"])
+        self.strong = Matcher(cfg.get("strong_terms", []))
+        self.weak = Matcher(cfg.get("weak_terms", []))
+        self.football = Matcher(cfg.get("football_context", []))
         self.exclude = Matcher(cfg.get("exclude_terms", []))
         names = []
         for p in cfg.get("players", []) + cfg.get("targets", []):
             names += [p["name"]] + p.get("aliases", []) + p.get("search_aliases", [])
         names += cfg.get("academy", [])
+        for p in cfg.get("staff", []):
+            names += [p["name"]] + p.get("aliases", [])
         self.names = Matcher(names)
         self.cfg = cfg
     def tier(self, it):
@@ -258,14 +267,22 @@ class Rules:
         if in_list(d, c.get("trusted_domains", [])): return "trusted"
         return "other"
     def relevant(self, it):
-        """Le titre doit contenir un terme du sujet ou un nom suivi (voir config)."""
+        """Garde un article seulement s'il concerne le sujet suivi (voir config)."""
         title = it["title"]
         t = norm(title)
+        full = norm(title + " " + it.get("summary", "")[:600])
         if self.exclude.has(t):
             return False
-        if any(re.search(r"\b" + re.escape(x) + r"\b", title) for x in self.cfg.get("case_sensitive_terms", [])) or self.club.has(t):
+        raw = title + " " + it.get("summary", "")[:600]
+        if any(re.search(r"\b" + re.escape(x) + r"\b", raw) for x in self.cfg.get("case_sensitive_terms", [])):
             return True
-        return self.names.has(norm(title + " " + it.get("summary", "")[:300]))
+        if self.strong.has(full) or self.names.has(full):
+            return True
+        if self.weak.has(t):   # mot ambigu (ex. nom de ville) : seulement dans le titre
+            if in_list(it["domain"], self.cfg.get("generalist_domains", [])):
+                return self.football.has(full)
+            return True
+        return False
     def classify(self, it):
         text = norm(it["title"] + " " + it["summary"])
         tier = it["tier"]
@@ -328,9 +345,11 @@ def fmt_alert(it, cat, level, kind, tz, extra=""):
     if kind == "confirmed":
         head = "🟣 CONFIRMÉ"
     t = it["published"].astimezone(tz).strftime("%H:%M") if it.get("published") else "?"
-    lines = [f"{head} · {CAT_EMOJI[cat]} {CAT_LABEL[cat]}", f"<b>{esc(it['title'])}</b>"]
+    lines = [f"{head} · {CAT_EMOJI[cat]} {CAT_LABEL[cat]}"]
     if it.get("fr"):
-        lines.append(f"🇫🇷 {esc(it['fr'])}")
+        lines += [f"<b>{esc(it['fr'])}</b>", f"<i>VO : {esc(it['title'])}</i>"]
+    else:
+        lines.append(f"<b>{esc(it['title'])}</b>")
     lines.append(f"🗞 {esc(it['source'])} · {BADGE[it['tier']]} · 🕐 {t} · 🌐 {it['lang']}")
     if it.get("player"):
         lines.append(f"👤 {esc(it['player'])}")
