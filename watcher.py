@@ -114,6 +114,11 @@ def build_sources(cfg):
         src.append({"kind": "rss", "url": f["url"], "origin": "direct", "lang": f.get("lang", "fr"),
                     "label": f"flux:{f['name']}", "player": None, "foreign": f.get("lang", "fr") != "fr",
                     "speed": "direct", "trust": f.get("trust")})
+    for h in cfg.get("html_pages", []):
+        src.append({"kind": "html", "url": h["url"], "pattern": h["pattern"], "origin": "html",
+                    "lang": h.get("lang", "fr"), "label": f"page:{h['name']}", "player": None,
+                    "foreign": False, "speed": "direct", "trust": h.get("trust"),
+                    "all_relevant": h.get("all_relevant", False), "name": h["name"]})
     for g in cfg.get("global_queries", []):
         add_gn(g["q"], g["locale"], "global", f"global:{g['q']} [{g['locale']}]",
                speed="fast" if g["locale"] == "FRA" else "slow")
@@ -172,6 +177,23 @@ def fetch_source(s):
                               "link": e.get("link", ""), "source": sname, "domain": sdom,
                               "published": to_dt(e.get("published_parsed") or e.get("updated_parsed")),
                               "summary": summ})
+        elif s["kind"] == "html":
+            r = requests.get(s["url"], headers=UA, timeout=20)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            pat = re.compile(s["pattern"])
+            seen_links = set()
+            for a_tag in soup.find_all("a", href=True):
+                href = requests.compat.urljoin(s["url"], a_tag["href"])
+                if not pat.search(href) or href in seen_links:
+                    continue
+                title = " ".join(a_tag.get_text(" ").split())
+                if len(title) < 15:
+                    continue
+                seen_links.add(href)
+                items.append({"id": mk_id("html:" + href), "title": title[:250], "link": href,
+                              "source": s["name"], "domain": domain_of(href), "published": None,
+                              "summary": "", "undated_ok": True})
         elif s["kind"] == "telegram":
             r = requests.get(f"https://t.me/s/{s['name']}", headers=UA, timeout=20)
             r.raise_for_status()
@@ -213,7 +235,8 @@ def fetch_source(s):
         return s, None, str(ex)
     for it in items:
         it.update({"origin": s["origin"], "lang": s["lang"], "player": s.get("player"),
-                   "forced_trust": s.get("trust"), "label": s["label"], "foreign": s.get("foreign", False)})
+                   "forced_trust": s.get("trust"), "label": s["label"], "foreign": s.get("foreign", False),
+                   "all_relevant": s.get("all_relevant", False), "speed": s.get("speed", "fast")})
     return s, items, None
 
 def collect(cfg, check=False, speeds=None, verbose=False):
@@ -225,11 +248,30 @@ def collect(cfg, check=False, speeds=None, verbose=False):
             if its:
                 items.extend(its)
     if check:
-        ok = sum(1 for _, i, e in results if i)
-        print(f"{len(results)} sources testées, {ok} renvoient des articles.\n")
+        now = now_utc()
+        lines = []
         for s, its, err in results:
-            status = f"{len(its)} articles" if its is not None else f"ERREUR: {err}"
-            print(f"  {'✔' if its else '✘'} {s['label']:<55} {status}")
+            if its is None:
+                lines.append(f"✘ {s['label']} : ERREUR {str(err)[:60]}")
+            elif not its:
+                lines.append(f"⚪ {s['label']} : 0 article")
+            else:
+                dates = [i["published"] for i in its if i["published"]]
+                age = f", dernier il y a {int((now - max(dates)).total_seconds() // 60)} min" if dates else ", sans dates"
+                lines.append(f"✔ {s['label']} : {len(its)} articles{age}")
+        ok = sum(1 for _, i, e in results if i)
+        report = [f"🩺 Diagnostic : {ok}/{len(results)} sources OK"] + sorted(lines)
+        if check == "telegram":
+            buf = ""
+            for l in report:
+                if len(buf) + len(l) > 3500:
+                    Sender(False).send("actu", html.escape(buf), silent=True); buf = ""
+                buf += l + "\n"
+            if buf:
+                Sender(False).send("actu", html.escape(buf), silent=True)
+            print(f"diagnostic envoyé sur Telegram ({ok}/{len(results)} OK)")
+        else:
+            print("\n".join(report))
         return []
     errs = [(s["label"], e) for s, i, e in results if e]
     if errs:   # en dépôt public les journaux sont visibles : on n'affiche que le nombre
@@ -270,19 +312,31 @@ class Rules:
         """Garde un article seulement s'il concerne le sujet suivi (voir config)."""
         title = it["title"]
         t = norm(title)
-        full = norm(title + " " + it.get("summary", "")[:600])
         if self.exclude.has(t):
             return False
-        raw = title + " " + it.get("summary", "")[:600]
-        if any(re.search(r"\b" + re.escape(x) + r"\b", raw) for x in self.cfg.get("case_sensitive_terms", [])):
+        if it.get("all_relevant"):
             return True
-        if self.strong.has(full) or self.names.has(full):
+        raw_t = title
+        cs = self.cfg.get("case_sensitive_terms", [])
+        def cs_in(txt):
+            return any(re.search(r"\b" + re.escape(x) + r"\b", txt) for x in cs)
+        if it.get("foreign"):   # presse étrangère : le nom (ou le club) doit être DANS LE TITRE
+            return cs_in(raw_t) or self.strong.has(t) or self.names.has(t)
+        full = norm(title + " " + it.get("summary", "")[:600])
+        if cs_in(title + " " + it.get("summary", "")[:600]) or self.strong.has(full) or self.names.has(full):
             return True
         if self.weak.has(t):   # mot ambigu (ex. nom de ville) : seulement dans le titre
             if in_list(it["domain"], self.cfg.get("generalist_domains", [])):
                 return self.football.has(full)
             return True
         return False
+    def matched_name(self, it):
+        t = norm(it["title"] + " " + it.get("summary", "")[:600])
+        for p in self.cfg.get("players", []) + self.cfg.get("targets", []) + self.cfg.get("staff", []):
+            for n in [p["name"]] + p.get("aliases", []) + p.get("search_aliases", []):
+                if Matcher([n]).has(t):
+                    return p["name"]
+        return None
     def classify(self, it):
         text = norm(it["title"] + " " + it["summary"])
         tier = it["tier"]
@@ -331,12 +385,25 @@ BADGE = {"official": "✅ officiel", "trusted": "🟢 source fiable", "competito
 def translate(text, lang, cfg):
     if lang == "fr" or not cfg.get("translate_to_french") or not text:
         return None
-    try:
-        from deep_translator import GoogleTranslator
-        out = GoogleTranslator(source="auto", target="fr").translate(text[:400])
-        return out if out and out.strip().lower() != text.strip().lower() else None
+    text = text[:400]
+    try:   # point d'accès public de Google Traduction
+        r = requests.get("https://translate.googleapis.com/translate_a/single",
+                         params={"client": "gtx", "sl": "auto", "tl": "fr", "dt": "t", "q": text},
+                         headers=UA, timeout=10)
+        out = "".join(part[0] for part in r.json()[0] if part and part[0])
+        if out.strip() and out.strip().lower() != text.strip().lower():
+            return out.strip()
     except Exception:
-        return None
+        pass
+    try:   # secours : MyMemory
+        r = requests.get("https://api.mymemory.translated.net/get",
+                         params={"q": text, "langpair": f"{lang}|fr"}, timeout=10)
+        out = r.json().get("responseData", {}).get("translatedText", "")
+        if out.strip() and out.strip().lower() != text.strip().lower():
+            return html.unescape(out.strip())
+    except Exception:
+        pass
+    return None
 
 def fmt_alert(it, cat, level, kind, tz, extra=""):
     CAT_LABEL.update(CFG_LABELS)
@@ -407,8 +474,22 @@ def process(items, cfg, state, now, sender, bootstrap):
         state["seen"][it["id"]] = time.time()
         if bootstrap:
             continue
+        if it["published"] is None and it.get("undated_ok"):
+            it["published"] = now      # page web : détecté maintenant
+        if it["published"] is None and not it.get("undated_ok"):
+            continue                   # pas de date fiable : on ignore (évite les vieux articles)
         if it["published"] and it["published"] < fresh_cut:
-            continue
+            continue                   # plus de 3 h : trop vieux, jamais envoyé
+        fm = cfg.get("freshness_minutes", {}).get(it.get("speed", "fast"))
+        late = bool(fm and it["published"] and it["published"] < now - timedelta(minutes=fm))
+        it["late_min"] = int((now - it["published"]).total_seconds() // 60) if late else 0
+        mdate = re.search(r"(20\d\d)[/-](\d\d)[/-](\d\d)", it["link"])
+        if mdate:
+            try:
+                if datetime(int(mdate[1]), int(mdate[2]), int(mdate[3]), tzinfo=timezone.utc) < now - timedelta(days=2):
+                    continue
+            except ValueError:
+                pass
         it["tier"] = rules.tier(it)
         if in_list(it["domain"], cfg.get("own_domains", [])):
             continue
@@ -431,6 +512,7 @@ def process(items, cfg, state, now, sender, bootstrap):
                 sent += 1
             continue
         cat, level, critical = rules.classify(it)
+        it["player"] = it.get("player") or rules.matched_name(it)
         state["clusters"].append({"tokens": sorted(tk), "first": now.isoformat(), "sources": [it["domain"]],
                                   "names": [it["source"]], "confirmed": False, "cat": cat})
         it["fr"] = translate(it["title"], it["lang"], cfg)
@@ -438,7 +520,11 @@ def process(items, cfg, state, now, sender, bootstrap):
             silent = cat == "veille"
         else:
             silent = not critical      # la nuit : tout arrive, mais ne sonne que si c'est critique
-        sender.send(cat, fmt_alert(it, cat, level, "alert", tz), silent=silent)
+        extra = ""
+        if it.get("late_min"):         # reçu en retard (lenteur de la source) : envoyé quand même, sans son
+            silent = True
+            extra = f"⏳ Publié il y a {it['late_min']} min (source lente)"
+        sender.send(cat, fmt_alert(it, cat, level, "alert", tz, extra), silent=silent)
         sent += 1
     return sent
 
@@ -449,6 +535,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-bootstrap", action="store_true")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--diag", action="store_true", help="diagnostic des sources envoyé sur Telegram")
     ap.add_argument("--test-telegram", action="store_true")
     ap.add_argument("--get-chat-id", action="store_true")
     ap.add_argument("--loop", type=float, default=0, help="tourner en boucle pendant N minutes")
@@ -466,8 +553,8 @@ def main():
     if a.test_telegram:
         ok = Sender(False).send("actu", "✅ Connexion Telegram OK.", silent=False)
         print("OK" if ok else "Échec"); return
-    if a.check:
-        collect(cfg, check=True); return
+    if a.check or a.diag:
+        collect(cfg, check="telegram" if a.diag else True); return
     deadline = time.time() + a.loop * 60
     while True:
         state = load_state()
