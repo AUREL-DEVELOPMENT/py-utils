@@ -493,6 +493,8 @@ def process(items, cfg, state, now, sender, bootstrap):
         it["tier"] = rules.tier(it)
         if in_list(it["domain"], cfg.get("own_domains", [])):
             continue
+        if re.search(r"forum", norm(it["domain"] + " " + it["source"]) + " " + (it.get("link") or "").lower()):
+            continue                   # jamais d'alertes issues d'un forum
         if it["tier"] == "other" and not cfg.get("allow_unknown_sources", False):
             continue                   # uniquement les médias sérieux listés
         if not rules.relevant(it):
