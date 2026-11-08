@@ -15,7 +15,7 @@ concurrency:
 jobs:
   job:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,7 +34,7 @@ jobs:
         env:
           CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
       - name: run
-        run: python watcher.py --loop 19 --interval 30
+        run: python watcher.py --loop 55 --interval 30
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
