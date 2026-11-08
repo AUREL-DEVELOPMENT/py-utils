@@ -1,0 +1,50 @@
+name: update
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"   
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: cache-${{ github.run_id }}
+          restore-keys: cache-
+      - name: config
+        run: printf '%s\n' "$CONFIG_YAML" > config.yaml
+        env:
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+      - name: run
+        run: python watcher.py --loop 19 --interval 30
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_MERCATO: ${{ secrets.TELEGRAM_CHAT_MERCATO }}
+          TELEGRAM_CHAT_ACTU: ${{ secrets.TELEGRAM_CHAT_ACTU }}
+          TELEGRAM_CHAT_JOUEURS: ${{ secrets.TELEGRAM_CHAT_JOUEURS }}
+          TELEGRAM_CHAT_VEILLE: ${{ secrets.TELEGRAM_CHAT_VEILLE }}
+      - name: save
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: cache-${{ github.run_id }}
