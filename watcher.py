@@ -501,6 +501,7 @@ def process(items, cfg, state, now, sender, bootstrap):
             continue
         if it["tier"] == "other" and not cfg.get("allow_unknown_sources", False):
             st["source_non_listee"] += 1
+            state.setdefault("_rejected", []).append(it["domain"])
             continue                   # uniquement les médias sérieux listés
         if not rules.relevant(it):
             st["hors_sujet"] += 1
@@ -580,8 +581,10 @@ def main():
         print(f"{datetime.now().strftime('%H:%M:%S')} : {len(items)} articles lus"
               f"{' [+google]' if fast_due else ''}{' [+étranger]' if slow_due else ''}, {n} alertes envoyées"
               + (" (premier lancement : état initialisé, rien envoyé)" if bootstrap else "")
-              + "  | " + " ".join(f"{k}={v}" for k, v in state.get("_stats", {}).items()), flush=True)
-        state.pop("_stats", None)
+              + "  | " + " ".join(f"{k}={v}" for k, v in state.get("_stats", {}).items())
+              + (f"  | sites non listés : {', '.join(sorted(set(state['_rejected'])))}" if state.get("_rejected") else ""),
+              flush=True)
+        state.pop("_stats", None); state.pop("_rejected", None)
         if not a.dry_run:
             save_state(state)
         if a.loop <= 0 or time.time() + a.interval > deadline:
