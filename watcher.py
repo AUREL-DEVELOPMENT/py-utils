@@ -466,6 +466,8 @@ def process(items, cfg, state, now, sender, bootstrap):
                          if datetime.fromisoformat(c["first"]) > now - timedelta(hours=6)]
     items.sort(key=lambda i: i["published"] or now)
     sent = 0
+    st = {"nouveaux": 0, "trop_vieux": 0, "sans_date": 0, "source_non_listee": 0, "hors_sujet": 0, "doublon": 0}
+    state["_stats"] = st
     for it in items:
         if it["id"] in state["seen"]:
             continue
@@ -474,11 +476,14 @@ def process(items, cfg, state, now, sender, bootstrap):
         state["seen"][it["id"]] = time.time()
         if bootstrap:
             continue
+        st["nouveaux"] += 1
         if it["published"] is None and it.get("undated_ok"):
             it["published"] = now      # page web : détecté maintenant
         if it["published"] is None and not it.get("undated_ok"):
+            st["sans_date"] += 1
             continue                   # pas de date fiable : on ignore (évite les vieux articles)
         if it["published"] and it["published"] < fresh_cut:
+            st["trop_vieux"] += 1
             continue                   # plus de 3 h : trop vieux, jamais envoyé
         fm = cfg.get("freshness_minutes", {}).get(it.get("speed", "fast"))
         late = bool(fm and it["published"] and it["published"] < now - timedelta(minutes=fm))
@@ -487,22 +492,24 @@ def process(items, cfg, state, now, sender, bootstrap):
         if mdate:
             try:
                 if datetime(int(mdate[1]), int(mdate[2]), int(mdate[3]), tzinfo=timezone.utc) < now - timedelta(days=2):
+                    st["trop_vieux"] += 1
                     continue
             except ValueError:
                 pass
         it["tier"] = rules.tier(it)
         if in_list(it["domain"], cfg.get("own_domains", [])):
             continue
-        if re.search(r"forum", norm(it["domain"] + " " + it["source"]) + " " + (it.get("link") or "").lower()):
-            continue                   # jamais d'alertes issues d'un forum
         if it["tier"] == "other" and not cfg.get("allow_unknown_sources", False):
+            st["source_non_listee"] += 1
             continue                   # uniquement les médias sérieux listés
         if not rules.relevant(it):
+            st["hors_sujet"] += 1
             continue                   # hors sujet
         tk = tokens(it["title"])
         cl = next((c for c in state["clusters"]
                    if jaccard(tk, set(c["tokens"])) >= 0.5 and now - datetime.fromisoformat(c["first"]) < win * 4), None)
         if cl:
+            st["doublon"] += 1
             if it["domain"] not in cl["sources"]:
                 cl["sources"].append(it["domain"]); cl["names"].append(it["source"])
             if (len(cl["sources"]) >= cfg["confirm_sources"] and not cl["confirmed"]
@@ -572,7 +579,9 @@ def main():
         n = process(items, cfg, state, now_utc(), sender, bootstrap)
         print(f"{datetime.now().strftime('%H:%M:%S')} : {len(items)} articles lus"
               f"{' [+google]' if fast_due else ''}{' [+étranger]' if slow_due else ''}, {n} alertes envoyées"
-              + (" (premier lancement : état initialisé, rien envoyé)" if bootstrap else ""), flush=True)
+              + (" (premier lancement : état initialisé, rien envoyé)" if bootstrap else "")
+              + "  | " + " ".join(f"{k}={v}" for k, v in state.get("_stats", {}).items()), flush=True)
+        state.pop("_stats", None)
         if not a.dry_run:
             save_state(state)
         if a.loop <= 0 or time.time() + a.interval > deadline:
